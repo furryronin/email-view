@@ -5,6 +5,10 @@
 [build.environment]
   NODE_VERSION = "18"
 
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["package.json", "package-lock.json"]
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
