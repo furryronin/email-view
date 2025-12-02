@@ -36,15 +36,16 @@ function connectToImap(): Promise<Imap> {
       port: config.port,
       tls: config.tls,
       tlsOptions: { rejectUnauthorized: false },
-      connTimeout: 10000, // 10 second connection timeout
-      authTimeout: 5000,  // 5 second auth timeout
+      connTimeout: 5000,  // 5 second connection timeout (reduced for Netlify)
+      authTimeout: 3000,  // 3 second auth timeout (reduced for Netlify)
+      keepalive: false,  // Disable keepalive to close connection faster
     })
 
-    // Set a timeout for the connection
+    // Set a timeout for the connection (reduced for Netlify free tier)
     const connectionTimeout = setTimeout(() => {
       imap.end()
       reject(new Error('IMAP connection timeout'))
-    }, 15000) // 15 second total timeout
+    }, 8000) // 8 second total timeout (leaving 2 seconds for processing)
 
     imap.once('ready', () => {
       clearTimeout(connectionTimeout)
@@ -114,24 +115,29 @@ async function fetchMultipleEmails(imap: Imap, uids: number[]): Promise<Buffer[]
     return []
   }
 
-  // Fetch emails sequentially to ensure proper ordering
-  const emailBuffers: Buffer[] = []
+  // Fetch emails in parallel for faster execution (Netlify timeout constraint)
+  // We'll maintain order by mapping results back to original order
+  const fetchPromises = uids.map((uid, index) => 
+    fetchEmail(imap, uid)
+      .then(buffer => ({ index, buffer, success: true }))
+      .catch(error => {
+        console.error(`Error fetching email ${uid}:`, error)
+        return { index, buffer: null, success: false }
+      })
+  )
   
-  for (const uid of uids) {
-    try {
-      const buffer = await fetchEmail(imap, uid)
-      emailBuffers.push(buffer)
-    } catch (error) {
-      console.error(`Error fetching email ${uid}:`, error)
-      // Continue with other emails even if one fails
-    }
-  }
+  const results = await Promise.all(fetchPromises)
   
-  return emailBuffers
+  // Sort by original index and filter out failed fetches
+  return results
+    .sort((a, b) => a.index - b.index)
+    .filter(result => result.success && result.buffer)
+    .map(result => result.buffer as Buffer)
 }
 
 export const handler: Handler = async (event, context) => {
   let imap: Imap | null = null
+  const startTime = Date.now()
 
   try {
     // Log for debugging (will appear in Netlify function logs)
@@ -145,13 +151,13 @@ export const handler: Handler = async (event, context) => {
 
     console.log('Connecting to IMAP...')
     imap = await connectToImap()
-    console.log('IMAP connected, opening inbox...')
+    console.log(`IMAP connected in ${Date.now() - startTime}ms, opening inbox...`)
     
     await openInbox(imap)
-    console.log('Inbox opened, searching emails...')
+    console.log(`Inbox opened in ${Date.now() - startTime}ms, searching emails...`)
     
     const results = await searchLatestEmails(imap)
-    console.log(`Found ${results.length} emails`)
+    console.log(`Found ${results.length} emails in ${Date.now() - startTime}ms`)
     
     if (results.length === 0) {
       if (imap) {
@@ -177,7 +183,7 @@ export const handler: Handler = async (event, context) => {
     console.log(`Requested ${maxEmails} emails, found ${results.length} in inbox, fetching ${uidsToFetch.length} emails...`)
     
     const emailBuffers = await fetchMultipleEmails(imap, uidsToFetch)
-    console.log(`Fetched ${emailBuffers.length} email buffers`)
+    console.log(`Fetched ${emailBuffers.length} email buffers in ${Date.now() - startTime}ms`)
 
     const emails = await Promise.all(
       emailBuffers.map(async (buffer) => {
@@ -204,7 +210,8 @@ export const handler: Handler = async (event, context) => {
       imap.end()
     }
 
-    console.log(`Successfully processed ${emailsReversed.length} emails (newest first)`)
+    const totalTime = Date.now() - startTime
+    console.log(`Successfully processed ${emailsReversed.length} emails (newest first) in ${totalTime}ms`)
     return {
       statusCode: 200,
       headers: {
