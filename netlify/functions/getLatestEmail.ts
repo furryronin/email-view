@@ -36,13 +36,23 @@ function connectToImap(): Promise<Imap> {
       port: config.port,
       tls: config.tls,
       tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 10000, // 10 second connection timeout
+      authTimeout: 5000,  // 5 second auth timeout
     })
 
+    // Set a timeout for the connection
+    const connectionTimeout = setTimeout(() => {
+      imap.end()
+      reject(new Error('IMAP connection timeout'))
+    }, 15000) // 15 second total timeout
+
     imap.once('ready', () => {
+      clearTimeout(connectionTimeout)
       resolve(imap)
     })
 
     imap.once('error', (err: Error) => {
+      clearTimeout(connectionTimeout)
       reject(err)
     })
 
@@ -124,15 +134,29 @@ export const handler: Handler = async (event, context) => {
   let imap: Imap | null = null
 
   try {
+    // Log for debugging (will appear in Netlify function logs)
+    console.log('Function invoked')
+    console.log('EMAIL_COUNT from env:', process.env.EMAIL_COUNT)
+    
     const emailCount = parseInt(process.env.EMAIL_COUNT || '1', 10)
     const maxEmails = Math.min(Math.max(1, emailCount), 50) // Limit between 1 and 50
+    
+    console.log(`Parsed emailCount: ${emailCount}, maxEmails: ${maxEmails}`)
 
+    console.log('Connecting to IMAP...')
     imap = await connectToImap()
+    console.log('IMAP connected, opening inbox...')
+    
     await openInbox(imap)
+    console.log('Inbox opened, searching emails...')
     
     const results = await searchLatestEmails(imap)
+    console.log(`Found ${results.length} emails`)
     
     if (results.length === 0) {
+      if (imap) {
+        imap.end()
+      }
       return {
         statusCode: 200,
         headers: {
@@ -147,8 +171,13 @@ export const handler: Handler = async (event, context) => {
     }
 
     // Get the latest N emails (results are sorted, last N are the latest)
-    const uidsToFetch = results.slice(-maxEmails)
+    // Only fetch as many as are available (don't exceed results.length)
+    const actualCount = Math.min(maxEmails, results.length)
+    const uidsToFetch = results.slice(-actualCount)
+    console.log(`Requested ${maxEmails} emails, found ${results.length} in inbox, fetching ${uidsToFetch.length} emails...`)
+    
     const emailBuffers = await fetchMultipleEmails(imap, uidsToFetch)
+    console.log(`Fetched ${emailBuffers.length} email buffers`)
 
     const emails = await Promise.all(
       emailBuffers.map(async (buffer) => {
@@ -168,8 +197,14 @@ export const handler: Handler = async (event, context) => {
       })
     )
 
-    imap.end()
+    // Reverse the array to show latest emails first (newest to oldest)
+    const emailsReversed = emails.reverse()
 
+    if (imap) {
+      imap.end()
+    }
+
+    console.log(`Successfully processed ${emailsReversed.length} emails (newest first)`)
     return {
       statusCode: 200,
       headers: {
@@ -177,14 +212,23 @@ export const handler: Handler = async (event, context) => {
         'Access-Control-Allow-Origin': '*',
       },
       body: JSON.stringify({
-        emails,
-        count: emails.length,
+        emails: emailsReversed,
+        count: emailsReversed.length,
       }),
     }
   } catch (error) {
+    console.error('Error in function:', error)
+    
     if (imap) {
-      imap.end()
+      try {
+        imap.end()
+      } catch (e) {
+        console.error('Error closing IMAP connection:', e)
+      }
     }
+
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+    console.error('Returning error response:', errorMessage)
 
     return {
       statusCode: 500,
@@ -193,7 +237,8 @@ export const handler: Handler = async (event, context) => {
         'Access-Control-Allow-Origin': '*',
       },
       body: JSON.stringify({
-        message: error instanceof Error ? error.message : 'Unknown error occurred',
+        message: errorMessage,
+        error: process.env.NODE_ENV === 'development' ? String(error) : undefined,
       }),
     }
   }

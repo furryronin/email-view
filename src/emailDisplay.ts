@@ -12,11 +12,10 @@ function formatDate(dateString: string): string {
 function renderEmail(email: EmailData, index: number, total: number): string {
   return `
     <div class="border border-gray-200 rounded-lg p-6 ${index < total - 1 ? 'mb-6' : ''}">
-      <div class="border-b border-gray-200 pb-4 mb-4">
-        <h2 class="text-2xl font-bold text-gray-900 mb-4">${escapeHtml(email.subject || '(No Subject)')}</h2>
+      <div class="max-w-3xl mx-auto  border-b border-gray-200 pb-4 mb-4">
         <div class="space-y-2 text-sm text-gray-600">
           <div>
-            <span class="font-semibold">From:</span> ${escapeHtml(email.from)}
+            <span class="font-semibold">Subject:</span> ${escapeHtml(email.subject || '(No Subject)')}
           </div>
           <div>
             <span class="font-semibold">To:</span> ${escapeHtml(email.to)}
@@ -28,7 +27,7 @@ function renderEmail(email: EmailData, index: number, total: number): string {
       </div>
       
       ${email.attachments && email.attachments.length > 0 ? `
-        <div class="border-b border-gray-200 pb-4 mb-4">
+        <div class=" pb-4 mb-4">
           <h3 class="font-semibold text-gray-900 mb-2">Attachments:</h3>
           <ul class="list-disc list-inside space-y-1">
             ${email.attachments.map(att => `

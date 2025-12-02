@@ -5,9 +5,16 @@
 [build.environment]
   NODE_VERSION = "18"
 
+[dev]
+  command = "npm run dev:vite"
+  publish = "dist"
+
 [functions]
   node_bundler = "esbuild"
   included_files = ["package.json", "package-lock.json"]
+
+[functions.getLatestEmail]
+  timeout = 26
 
 [[redirects]]
   from = "/*"

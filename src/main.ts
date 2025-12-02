@@ -7,8 +7,8 @@ async function init() {
   
   app.innerHTML = `
     <div class="min-h-screen bg-gray-100 py-8 px-4">
-      <div class="max-w-4xl mx-auto">
-        <h1 class="text-3xl font-bold text-gray-900 mb-6">Latest Emails</h1>
+      <div class="max-w-3xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-900 mb-6">Subscription Inbox</h1>
         <div id="email-container" class="bg-white rounded-lg shadow-lg p-6">
           <div class="text-center py-8">
             <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>

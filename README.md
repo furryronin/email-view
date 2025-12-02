@@ -53,12 +53,21 @@ For other email providers, adjust the `IMAP_HOST` and `IMAP_PORT` accordingly:
 
 ## Development
 
-Run the development server:
+Run the development server with Netlify Functions support:
 ```bash
 npm run dev
 ```
 
-The app will be available at `http://localhost:3000`
+This will start both the Vite dev server and Netlify Functions locally. The app will be available at `http://localhost:8888` (Netlify Dev's default port, which proxies to Vite on port 5173).
+
+**Note:** Make sure you have a `.env` file with your IMAP credentials set up for local development. The functions will use these environment variables.
+
+If you only want to run the frontend without functions (for UI development):
+```bash
+npm run dev:vite
+```
+
+The app will be available at `http://localhost:5173`, but API calls will fail since functions won't be available.
 
 ## Building
 
