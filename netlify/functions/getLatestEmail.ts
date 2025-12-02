@@ -81,6 +81,10 @@ function searchLatestEmails(imap: Imap): Promise<number[]> {
 
 function fetchEmail(imap: Imap, uid: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    const fetchTimeout = setTimeout(() => {
+      reject(new Error(`Timeout fetching email ${uid}`))
+    }, 5000) // 5 second timeout per email
+    
     const fetch = imap.fetch([uid], { bodies: '' })
     let emailBuffer = Buffer.alloc(0)
     let messageReceived = false
@@ -89,20 +93,28 @@ function fetchEmail(imap: Imap, uid: number): Promise<Buffer> {
       msg.on('body', (stream) => {
         stream.on('data', (chunk: Buffer) => {
           emailBuffer = Buffer.concat([emailBuffer, chunk])
+          // Limit email size to prevent memory issues (10MB max)
+          if (emailBuffer.length > 10 * 1024 * 1024) {
+            clearTimeout(fetchTimeout)
+            reject(new Error(`Email ${uid} too large (max 10MB)`))
+          }
         })
       })
       
       msg.once('end', () => {
+        clearTimeout(fetchTimeout)
         messageReceived = true
         resolve(emailBuffer)
       })
     })
     
     fetch.once('error', (err) => {
+      clearTimeout(fetchTimeout)
       reject(err)
     })
     
     fetch.once('end', () => {
+      clearTimeout(fetchTimeout)
       if (!messageReceived || emailBuffer.length === 0) {
         reject(new Error('No email data received'))
       }
@@ -110,29 +122,56 @@ function fetchEmail(imap: Imap, uid: number): Promise<Buffer> {
   })
 }
 
-async function fetchMultipleEmails(imap: Imap, uids: number[]): Promise<Buffer[]> {
+async function fetchMultipleEmails(imap: Imap, uids: number[], startTime: number, maxTime: number = 8000): Promise<Buffer[]> {
   if (uids.length === 0) {
     return []
   }
 
-  // Fetch emails in parallel for faster execution (Netlify timeout constraint)
-  // We'll maintain order by mapping results back to original order
-  const fetchPromises = uids.map((uid, index) => 
-    fetchEmail(imap, uid)
-      .then(buffer => ({ index, buffer, success: true }))
-      .catch(error => {
+  const emailBuffers: Buffer[] = []
+  
+  // Always fetch the latest email first (most important)
+  // uids are in ascending order, so last one is newest
+  const latestUid = uids[uids.length - 1]
+  try {
+    const elapsed = Date.now() - startTime
+    if (elapsed > maxTime) {
+      console.log(`Time limit reached (${elapsed}ms), stopping email fetch`)
+      return emailBuffers
+    }
+    
+    const firstBuffer = await fetchEmail(imap, latestUid)
+    emailBuffers.push(firstBuffer)
+    console.log(`Fetched latest email (UID: ${latestUid}) in ${Date.now() - startTime}ms`)
+  } catch (error) {
+    console.error(`Error fetching latest email:`, error)
+    // Return empty if we can't even get the first email
+    return emailBuffers
+  }
+  
+  // If we have more emails and time permits, fetch them one at a time
+  // This ensures we get at least one email even if we timeout
+  if (uids.length > 1 && (Date.now() - startTime) < maxTime) {
+    const remainingUids = uids.slice(0, -1).reverse() // Reverse to get newest first
+    
+    for (const uid of remainingUids) {
+      const elapsed = Date.now() - startTime
+      if (elapsed > maxTime) {
+        console.log(`Time limit reached (${elapsed}ms), stopping at ${emailBuffers.length} emails`)
+        break
+      }
+      
+      try {
+        const buffer = await fetchEmail(imap, uid)
+        emailBuffers.push(buffer)
+        console.log(`Fetched email (UID: ${uid}) in ${Date.now() - startTime}ms`)
+      } catch (error) {
         console.error(`Error fetching email ${uid}:`, error)
-        return { index, buffer: null, success: false }
-      })
-  )
+        // Continue with next email
+      }
+    }
+  }
   
-  const results = await Promise.all(fetchPromises)
-  
-  // Sort by original index and filter out failed fetches
-  return results
-    .sort((a, b) => a.index - b.index)
-    .filter(result => result.success && result.buffer)
-    .map(result => result.buffer as Buffer)
+  return emailBuffers
 }
 
 export const handler: Handler = async (event, context) => {
@@ -145,7 +184,9 @@ export const handler: Handler = async (event, context) => {
     console.log('EMAIL_COUNT from env:', process.env.EMAIL_COUNT)
     
     const emailCount = parseInt(process.env.EMAIL_COUNT || '1', 10)
-    const maxEmails = Math.min(Math.max(1, emailCount), 50) // Limit between 1 and 50
+    // For Netlify free tier, limit to 1 email to avoid timeouts
+    // Can increase if on Pro tier or if connection is fast
+    const maxEmails = Math.min(Math.max(1, emailCount), 1) // Temporarily limited to 1 for timeout issues
     
     console.log(`Parsed emailCount: ${emailCount}, maxEmails: ${maxEmails}`)
 
@@ -182,26 +223,71 @@ export const handler: Handler = async (event, context) => {
     const uidsToFetch = results.slice(-actualCount)
     console.log(`Requested ${maxEmails} emails, found ${results.length} in inbox, fetching ${uidsToFetch.length} emails...`)
     
-    const emailBuffers = await fetchMultipleEmails(imap, uidsToFetch)
+    // Pass startTime and maxTime (8 seconds) to ensure we return before timeout
+    const emailBuffers = await fetchMultipleEmails(imap, uidsToFetch, startTime, 8000)
     console.log(`Fetched ${emailBuffers.length} email buffers in ${Date.now() - startTime}ms`)
+    
+    if (emailBuffers.length === 0) {
+      if (imap) {
+        imap.end()
+      }
+      return {
+        statusCode: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+        body: JSON.stringify({
+          message: 'Failed to fetch any emails. This may be due to timeout or connection issues.',
+        }),
+      }
+    }
 
-    const emails = await Promise.all(
-      emailBuffers.map(async (buffer) => {
+    // Parse emails with timeout protection
+    const parseEmail = async (buffer: Buffer) => {
+      try {
         const parsed = await simpleParser(buffer)
+        // Limit text/html content to prevent huge payloads
+        const maxContentLength = 50000 // Limit to 50KB per email
+        let text = parsed.text
+        let html = parsed.html
+        
+        if (text && text.length > maxContentLength) {
+          text = text.substring(0, maxContentLength) + '... (truncated)'
+        }
+        if (html && html.length > maxContentLength) {
+          html = html.substring(0, maxContentLength) + '... (truncated)'
+        }
+        
         return {
           subject: parsed.subject || '(No Subject)',
           from: parsed.from?.text || 'Unknown',
           to: parsed.to?.text || 'Unknown',
           date: parsed.date?.toISOString() || new Date().toISOString(),
-          text: parsed.text || undefined,
-          html: parsed.html || undefined,
+          text: text || undefined,
+          html: html || undefined,
           attachments: parsed.attachments?.map(att => ({
             filename: att.filename || 'unnamed',
             contentType: att.contentType || 'application/octet-stream',
           })),
         }
-      })
-    )
+      } catch (error) {
+        console.error('Error parsing email:', error)
+        return null
+      }
+    }
+
+    const emails = (await Promise.all(
+      emailBuffers.map(buffer => parseEmail(buffer))
+    )).filter(email => email !== null) as Array<{
+      subject: string
+      from: string
+      to: string
+      date: string
+      text?: string
+      html?: string
+      attachments?: Array<{ filename: string; contentType: string }>
+    }>
 
     // Reverse the array to show latest emails first (newest to oldest)
     const emailsReversed = emails.reverse()

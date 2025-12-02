@@ -92,7 +92,18 @@ npm run preview
    - `IMAP_PORT` (optional, defaults to `993`)
    - `IMAP_TLS` (optional, defaults to `true`)
    - `EMAIL_COUNT` (optional, defaults to `1`, max: `50`)
+   
+   **Note:** Due to Netlify's 10-second timeout limit on the free tier, `EMAIL_COUNT` is currently limited to 1 email in production. If you're on Netlify Pro (26-second timeout), you can modify the limit in `netlify/functions/getLatestEmail.ts`.
+   
 4. Deploy!
+
+### Troubleshooting Timeouts
+
+If you experience timeout errors:
+1. Check the Netlify function logs to see where it's timing out
+2. Ensure your IMAP server is accessible from Netlify's servers
+3. Consider using Netlify Pro for a 26-second timeout
+4. Temporarily limit `EMAIL_COUNT` to 1 until connection speed improves
 
 The Netlify function will automatically be deployed and available at `/.netlify/functions/getLatestEmail`
 
